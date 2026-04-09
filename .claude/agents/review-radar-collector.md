@@ -88,6 +88,11 @@ gh api graphql -f query='
 
 ### 4. 답글 감정 분류
 
+`priority == "Good"` 스레드는 칭찬 코멘트이므로 accept/reject/neutral 판별을 건너뛰고
+`sentiment: "good"`으로 고정한다. 5~6단계(이모지/diff override)도 적용하지 않는다.
+
+나머지 스레드(`priority != "Good"`)에 대해서만 아래를 수행한다.
+
 #### 텍스트 답글 분류
 
 **`accept` 우선 판별** (아래 중 하나라도 해당하면 accept):
@@ -210,5 +215,5 @@ def line_changed_in_patch(patch, line):
 저장 완료 후 수집 통계를 출력한다:
 ```
 수집 완료: PR {N}개, AI 스레드 {N}건, 사람 스레드 {N}건
-  감정: accept {N}건 (텍스트 {N} + 이모지 {N} + diff {N}), reject {N}건, neutral {N}건
+  감정: accept {N}건 (텍스트 {N} + 이모지 {N} + diff {N}), reject {N}건, neutral {N}건, good {N}건
 ```
