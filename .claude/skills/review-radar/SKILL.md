@@ -84,9 +84,10 @@ accept_emoji = sum(1 for pr in data for t in pr['threads'] if t.get('source')=='
 accept_diff = accept - accept_text - accept_emoji
 reject = sum(1 for pr in data for t in pr['threads'] if t.get('source')=='our' and t.get('sentiment')=='reject')
 neutral = sum(1 for pr in data for t in pr['threads'] if t.get('source')=='our' and t.get('sentiment')=='neutral')
+good = sum(1 for pr in data for t in pr['threads'] if t.get('source')=='our' and t.get('sentiment')=='good')
 print(len(data))
 print(f'PR: {len(data)}개 (AI리뷰: {ai_reviewed}개), our AI: {our}건, growth AI: {growth}건, 사람: {human}건')
-print(f'감정: accept {accept}건 (text:{accept_text} emoji:{accept_emoji} diff:{accept_diff}), reject: {reject}건, neutral: {neutral}건')
+print(f'감정: accept {accept}건 (text:{accept_text} emoji:{accept_emoji} diff:{accept_diff}), reject: {reject}건, neutral: {neutral}건, good: {good}건')
 "
 ```
 첫 번째 출력값이 0이면 "분석할 PR이 없습니다." 출력 후 종료.
@@ -129,10 +130,21 @@ FP_RESULT와 GAP_RESULT, 그리고 Phase 1에서 계산한 `COLLECTION_STATS`를
 |------|------|
 | 분석 PR 수 | N개 |
 | AI 리뷰 있는 PR | N개 |
+| our AI 코멘트 | N건 (Good N + P1~P5 N) |
+| growth AI 코멘트 | N건 |
+| 사람 코멘트 | N건 |
 | 오탐 (AI 코멘트 거절) | N건 |
 | 누락 — 사람이 잡은 것 | N건 |
 | 누락 — growth만 잡은 실질 이슈 | N건 |
-| growth-code-review 코멘트 (priority=null) | N건 |
+
+### 답글 감정 분포 (our P1~P5 코멘트 기준)
+
+| 감정 | 건수 | 비고 |
+|-----|------|------|
+| accept | N건 | 텍스트 N + 이모지 N + diff N |
+| reject | N건 | |
+| neutral | N건 | |
+| good | N건 | Good 코멘트 (별도 집계) |
 
 ---
 
