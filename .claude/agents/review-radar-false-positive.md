@@ -17,6 +17,33 @@ Collector가 수집한 PR 데이터에서 AI 코멘트에 대해 PR 작성자가
 
 ## 분석 절차
 
+### 0. neutral 스레드 오탐 체크
+
+조건: `source == "our"` AND `sentiment == "neutral"` 인 스레드 전체.
+
+neutral 스레드가 0건이면 이 단계를 건너뛴다.
+
+각 neutral 스레드에 대해:
+
+1. `file` 경로를 Read tool로 읽는다. 파일이 없으면 `resolved` 처리.
+2. AI 코멘트가 지적한 코드 패턴이 현재 파일에 존재하는지 확인한다.
+3. 존재하면 → `valid` (진짜 무응답). 존재하지 않으면 → `resolved` (이미 수정됨 또는 오탐).
+
+판정 결과를 아래 포맷으로 출력한다:
+
+```markdown
+## neutral 스레드 오탐 체크
+
+| PR | 파일 | priority | 판정 | 근거 |
+|----|------|----------|------|------|
+| #N | path/to/File.kt | P3 | valid | 코드 여전히 존재 |
+| #N | path/to/File.kt | P4 | resolved | cachedHeaderPosition 필드 없음 |
+```
+
+`resolved` 판정이 있으면 리포트의 "스킬 자체 이슈" 섹션에 기록한다.
+
+---
+
 ### 1. 거절 스레드 추출
 
 조건: `type == "ai"` AND replies 중 `sentiment == "reject"` 가 1개 이상인 스레드.
