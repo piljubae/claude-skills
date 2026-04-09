@@ -88,15 +88,6 @@ gh api graphql -f query='
 
 ### 4. 답글 감정 분류
 
-각 스레드의 감정은 **답글 텍스트**와 **root 코멘트의 이모지 반응** 두 가지를 종합해 결정한다.
-
-#### 이모지 반응 분류 (root AI 코멘트 기준)
-
-PR 작성자(`pullRequest.author.login`)가 AI 코멘트 root에 남긴 반응:
-- `THUMBS_UP`, `HEART`, `HOORAY`, `ROCKET` → `accept` 신호
-- `THUMBS_DOWN`, `CONFUSED` → `reject` 신호
-- 반응 없음 → 신호 없음
-
 #### 텍스트 답글 분류
 
 **`accept` 우선 판별** (아래 중 하나라도 해당하면 accept):
@@ -112,13 +103,64 @@ PR 작성자(`pullRequest.author.login`)가 AI 코멘트 root에 남긴 반응:
 
 **`neutral`**: 위 어디에도 해당 없는 경우 (질문, 단순 확인, 논의)
 
-#### 최종 감정 결정 (우선순위)
+#### 최종 텍스트 감정 결정
 
-1. 텍스트 답글이 `accept` 또는 `reject`이면 → 텍스트 우선
-2. 텍스트가 `neutral`이고 이모지 반응이 있으면 → 이모지 반응으로 결정
-3. 텍스트 `neutral` + 이모지 없음 → `neutral`
+- 답글 중 `reject`가 하나라도 있으면 → `reject`
+- 답글 중 `accept`가 있고 `reject`가 없으면 → `accept`
+- 그 외(답글 없거나 전부 neutral) → `neutral` (→ 5단계에서 diff로 override될 수 있음)
 
-### 5. 결과 저장
+### 5. 이모지 반응으로 neutral 스레드 override
+
+텍스트 감정이 `neutral`인 AI 스레드에 대해
+PR 작성자(`pr_author`)가 root 코멘트에 남긴 이모지 반응을 확인한다:
+- `THUMBS_UP`, `HEART`, `HOORAY`, `ROCKET` → sentiment `"accept"`
+- `THUMBS_DOWN`, `CONFUSED` → sentiment `"reject"`
+- 반응 없음 → 신호 없음, 다음 단계(diff)로 넘어감
+
+### 6. PR diff로 neutral 스레드 override
+
+이모지 반응 후에도 `neutral`인 AI 스레드(답글 없거나 accept/reject 미판별)에 대해
+PR의 변경 파일을 확인해 AI가 지적한 라인이 실제로 수정됐는지 검증한다.
+
+```bash
+gh api repos/${REPO}/pulls/${PR_NUMBER}/files \
+  --jq '[.[] | {filename, patch}]'
+```
+
+python3으로 아래 로직 실행:
+
+```python
+import re
+
+def line_changed_in_patch(patch, line):
+    """AI 코멘트의 line이 PR diff에서 변경된 라인(+줄)에 해당하는지 확인."""
+    if not patch or not line:
+        return False
+    current_new = 0
+    for raw in patch.split('\n'):
+        if raw.startswith('@@'):
+            m = re.search(r'\+(\d+)(?:,\d+)?', raw)
+            if m:
+                current_new = int(m.group(1)) - 1
+        elif raw.startswith('+'):
+            current_new += 1
+            # 지적한 라인 ±5 범위 내에 변경이 있으면 수정된 것으로 판단
+            if abs(current_new - line) <= 5:
+                return True
+        elif not raw.startswith('-'):
+            current_new += 1
+    return False
+```
+
+판정 기준:
+- AI 스레드의 `file`이 PR 변경 파일 목록에 **없음** → `diff_changed: false`, sentiment 유지 `neutral`
+- `file`이 변경 파일에 **있고** `line`이 null → `diff_changed: true`, sentiment → `"accept"` (파일 전체 수정)
+- `file`이 변경 파일에 **있고** `line` 근방(±5줄)이 변경됨 → `diff_changed: true`, sentiment → `"accept"`
+- `file`이 변경 파일에 있지만 해당 라인 근방 변경 없음 → `diff_changed: false`, sentiment 유지 `neutral`
+
+이미 `accept` 또는 `reject`인 스레드는 이 단계를 건너뛴다.
+
+### 7. 결과 저장
 
 아래 JSON 배열을 OUTPUT_FILE에 저장한다 (Write tool 또는 python3 사용):
 
@@ -128,6 +170,7 @@ PR 작성자(`pullRequest.author.login`)가 AI 코멘트 root에 남긴 반응:
     "number": 7300,
     "title": "KMA-XXXX 설명",
     "ai_reviewed": true,
+    "pr_author": "작성자ID",
     "threads": [
       {
         "type": "ai",
@@ -137,8 +180,11 @@ PR 작성자(`pullRequest.author.login`)가 AI 코멘트 root에 남긴 반응:
         "line": 42,
         "url": "https://github.com/.../pull/7300#discussion_rXXXXXX",
         "body": "AI 코멘트 본문",
+        "is_resolved": false,
+        "sentiment": "accept",
+        "diff_changed": true,
         "replies": [
-          {"author": "사용자ID", "body": "답글 본문", "sentiment": "reject"}
+          {"author": "사용자ID", "body": "답글 본문", "sentiment": "accept"}
         ]
       },
       {
@@ -147,6 +193,7 @@ PR 작성자(`pullRequest.author.login`)가 AI 코멘트 root에 남긴 반응:
         "line": 10,
         "url": "https://github.com/.../pull/7300#discussion_rXXXXXX",
         "body": "사람 코멘트 본문",
+        "is_resolved": true,
         "replies": []
       }
     ]
@@ -154,9 +201,14 @@ PR 작성자(`pullRequest.author.login`)가 AI 코멘트 root에 남긴 반응:
 ]
 ```
 
-`ai_reviewed`는 해당 PR에 `type: "ai"` 스레드가 1개 이상 있으면 `true`.
+필드 설명:
+- `pr_author`: GraphQL `pullRequest.author.login` 값
+- `is_resolved`: GraphQL `reviewThreads.nodes.isResolved` 값 (boolean)
+- `sentiment` (AI 스레드): 최종 감정 — 텍스트 우선, neutral이면 diff로 override
+- `diff_changed` (AI 스레드): PR diff에서 해당 파일/라인이 변경됐는지 여부 (boolean)
 
 저장 완료 후 수집 통계를 출력한다:
 ```
 수집 완료: PR {N}개, AI 스레드 {N}건, 사람 스레드 {N}건
+  감정: accept {N}건 (텍스트 {N} + 이모지 {N} + diff {N}), reject {N}건, neutral {N}건
 ```
