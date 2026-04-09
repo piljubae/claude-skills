@@ -24,12 +24,13 @@ OWNER와 REPO_NAME을 REPO에서 파싱 (`/` 기준으로 분리).
 gh pr list \
   --repo ${REPO} \
   --state merged \
-  --limit 100 \
+  --limit 300 \
   --json number,title,mergedAt \
   --jq "[.[] | select(.mergedAt >= \"${SINCE}T00:00:00Z\") | {number, title}]"
 ```
 
 결과가 빈 배열이면 `[]`를 OUTPUT_FILE에 쓰고 종료.
+결과 수가 250개 이상이면 "⚠️ PR 수가 250개 이상입니다. --limit 300에 근접해 일부 누락됐을 수 있습니다." 경고 출력 후 계속 진행.
 
 ### 2. PR별 스레드 수집
 
