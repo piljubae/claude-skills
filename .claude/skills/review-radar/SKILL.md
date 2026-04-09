@@ -66,11 +66,31 @@ prompt: |
 ```
 파일이 없거나 비어있으면 "데이터 수집에 실패했습니다." 출력 후 종료.
 
-PR 수 확인:
+수집 통계 확인 (JSON에서 직접 계산):
 ```bash
-python3 -c "import json; d=json.load(open('/tmp/review_radar_pr_data.json')); print(len(d))"
+python3 -c "
+import json
+data = json.load(open('/tmp/review_radar_pr_data.json'))
+if not data:
+    print('0')
+    exit()
+our = sum(1 for pr in data for t in pr['threads'] if t.get('type')=='ai' and t.get('source')=='our')
+growth = sum(1 for pr in data for t in pr['threads'] if t.get('type')=='ai' and t.get('source')=='growth')
+human = sum(1 for pr in data for t in pr['threads'] if t.get('type')=='human')
+ai_reviewed = sum(1 for pr in data if pr.get('ai_reviewed'))
+accept = sum(1 for pr in data for t in pr['threads'] if t.get('source')=='our' and t.get('sentiment')=='accept')
+accept_text = sum(1 for pr in data for t in pr['threads'] if t.get('source')=='our' and t.get('sentiment')=='accept' and any(r.get('sentiment')=='accept' for r in t.get('replies',[])))
+accept_emoji = sum(1 for pr in data for t in pr['threads'] if t.get('source')=='our' and t.get('sentiment')=='accept' and not t.get('diff_changed') and not any(r.get('sentiment')=='accept' for r in t.get('replies',[])))
+accept_diff = accept - accept_text - accept_emoji
+reject = sum(1 for pr in data for t in pr['threads'] if t.get('source')=='our' and t.get('sentiment')=='reject')
+neutral = sum(1 for pr in data for t in pr['threads'] if t.get('source')=='our' and t.get('sentiment')=='neutral')
+print(len(data))
+print(f'PR: {len(data)}개 (AI리뷰: {ai_reviewed}개), our AI: {our}건, growth AI: {growth}건, 사람: {human}건')
+print(f'감정: accept {accept}건 (text:{accept_text} emoji:{accept_emoji} diff:{accept_diff}), reject: {reject}건, neutral: {neutral}건')
+"
 ```
-0이면 "분석할 PR이 없습니다." 출력 후 종료.
+첫 번째 출력값이 0이면 "분석할 PR이 없습니다." 출력 후 종료.
+이 통계를 `COLLECTION_STATS`로 저장해 리포트 작성 시 활용한다.
 
 ### 3. Phase 2 — 병렬 분석 (2 에이전트 동시 실행)
 
@@ -94,7 +114,8 @@ python3 -c "import json; d=json.load(open('/tmp/review_radar_pr_data.json')); pr
 
 ### 4. 리포트 작성 및 저장
 
-FP_RESULT와 GAP_RESULT를 바탕으로 직접 아래 형식의 리포트를 작성한다.
+FP_RESULT와 GAP_RESULT, 그리고 Phase 1에서 계산한 `COLLECTION_STATS`를 바탕으로 직접 아래 형식의 리포트를 작성한다.
+종합 분석 요약의 수치는 반드시 `COLLECTION_STATS` 값을 사용한다 (에이전트 보고 수치 사용 금지).
 
 ```markdown
 # Review Radar — {SINCE} ~ {TODAY} ({DAYS}일간)
