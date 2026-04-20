@@ -81,14 +81,19 @@ ESCALATE 시:
 
 ### Phase 3: 실패 테스트 작성
 
-#### 3-A: 단위 테스트 가능 여부 판단
+> **⛔ 이 Phase는 스킵 불가.** "View 레이어라 테스트 의미 없음" 등의 이유로 건너뛰지 않는다.
+> 크래시 수정의 회귀 방지는 테스트로만 보장된다. 테스트 없는 수정은 Phase 4로 진행할 수 없다.
+
+#### 3-A: 테스트 전략 판단
 
 | 크래시 위치 | 테스트 전략 |
 |------------|------------|
-| ViewModel / UseCase / Repository | **단위 테스트** (BaseMockKTest) |
-| Activity / Fragment (FragmentManager, View 직접 참조) | **Instrumented Test** |
+| ViewModel / UseCase / Repository | **단위 테스트** (BaseMockKTest) → 3-B |
+| Activity / Fragment (FragmentManager, View 직접 참조) | **Instrumented Test** → 3-C |
+| Custom View / 라이브러리 래퍼 (ViewPager, RecyclerView 등) | **Robolectric 단위 테스트** → 3-D |
+| ANR (성능 문제) | **Instrumented Test + assertion** → 3-E |
 
-단위 테스트가 의미 없는 기준: 테스트가 프레임워크 동작(FragmentManager, View)을 직접 검증해야 할 때.
+어떤 레이어든 테스트 가능한 형태가 반드시 존재한다. 크래시 재현이 어려우면 **방어 코드의 동작을 검증**하는 테스트를 작성한다.
 
 #### 3-B: 단위 테스트 (ViewModel/UseCase/Repository)
 
@@ -137,6 +142,53 @@ ESCALATE 시:
 ```bash
 ./gradlew :app:connectedStoreDebugAndroidTest \
   -Pandroid.testInstrumentationRunnerArguments.class=com.dbs.kurly.m2.MainActivityTest#테스트명
+```
+
+FAIL → 정상 / PASS → 재현 실패, 테스트 수정 필요
+
+#### 3-D: Robolectric 단위 테스트 (Custom View / 라이브러리 래퍼)
+
+커스텀 View의 방어 코드(try-catch, null 체크 등)가 동작하는지 검증한다.
+
+```kotlin
+// 예: ViewPager 멀티터치 방어 코드 검증
+@RunWith(RobolectricTestRunner::class)
+class TouchEventErrorHandledViewPagerTest {
+
+    @Test
+    fun onInterceptTouchEvent_whenExceptionThrown_returnsFalseWithoutCrash() {
+        val viewPager = spy(TouchEventErrorHandledViewPager(context))
+        // super.onInterceptTouchEvent가 예외를 던지도록 설정
+        doThrow(IllegalArgumentException("pointerIndex out of range"))
+            .whenever(viewPager).callSuperOnInterceptTouchEvent(any())
+        
+        val result = viewPager.onInterceptTouchEvent(motionEvent)
+        assertThat(result).isFalse()  // 크래시 없이 false 반환
+    }
+}
+```
+
+직접 재현이 어려우면 **방어 코드의 catch 경로**를 검증하는 것으로 충분하다.
+단, 크래시 시나리오를 Given/When/Then 주석으로 명시한다.
+
+#### 3-E: ANR 검증 (Instrumented Test + assertion)
+
+ANR은 타이밍 재현이 불가하므로, **원인 제거를 간접 검증**한다:
+
+| ANR 원인 | 검증 방법 |
+|----------|----------|
+| wrap_content로 전체 ViewHolder inflation | ViewHolder 생성 수 ≤ 화면에 보이는 수 + cache 크기 assertion |
+| 메인 스레드 blocking I/O | StrictMode 또는 메인 스레드 실행 시간 assertion |
+| 과도한 레이아웃 패스 | OnGlobalLayoutListener count assertion |
+
+```kotlin
+// 예: RecyclerView가 전체 아이템을 한 번에 inflate하지 않는지 검증
+@Test
+fun onCreateViewHolder_whenLargeDataSet_doesNotInflateAllAtOnce() {
+    // Given: 50개 아이템 submitList
+    // When: 첫 레이아웃 완료
+    // Then: 생성된 ViewHolder 수 < 전체 아이템 수
+}
 ```
 
 FAIL → 정상 / PASS → 재현 실패, 테스트 수정 필요
