@@ -111,8 +111,8 @@ GROUP BY issue_title, issue_subtitle
 """
 
 stack_query = f"""
-SELECT t.frames FROM `{TABLE}`, UNNEST(threads) AS t
-WHERE issue_id = '{ISSUE_ID}' AND t.crashed = TRUE
+SELECT t.frames, t.crashed, t.blamed FROM `{TABLE}`, UNNEST(threads) AS t
+WHERE issue_id = '{ISSUE_ID}' AND (t.crashed = TRUE OR t.blamed = TRUE)
   AND DATE(event_timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 90 DAY)
 LIMIT 1
 """
@@ -135,6 +135,7 @@ bc_rows    = list(client.query(breadcrumb_query).result())
 result = {
     "stats":        dict(stats_rows[0]) if stats_rows else {},
     "stack_frames": [dict(f) for f in stack_rows[0].frames] if stack_rows else [],
+    "stack_type":   "anr_blamed" if (stack_rows and stack_rows[0].blamed) else "crashed",
     "session_id":   bc_rows[0].firebase_session_id if bc_rows else None,
     "breadcrumbs":  [dict(b) for b in bc_rows[0].breadcrumbs] if bc_rows else [],
     "logs":         [dict(l) for l in bc_rows[0].logs] if bc_rows else [],
