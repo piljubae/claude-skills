@@ -54,6 +54,13 @@
 3. Read로 관련 파일 열어 문제 코드 블록 특정
 4. Fragment/Activity 관계라면 상위 호출자까지 추적
 
+#### 기존 부분 수정 발견 시
+
+탐색 중 동일 크래시에 대한 이전 수정이 일부 파일에만 적용된 흔적 발견 시:
+1. 수정이 누락된 전체 호출 경로를 파악한다
+2. CP1에 "기존 수정 범위"와 "이번 수정 범위"를 명시한다
+3. 이번 티켓 범위에서 일괄 수정할지, 나머지는 별도 티켓으로 분리할지 CP1에서 사용자 확인
+
 ### Phase 2: 분석
 
 Phase 1 결과를 이어받아:
@@ -100,12 +107,18 @@ ESCALATE 시:
 
 #### 3-A: 테스트 전략 판단
 
-| 크래시 위치 | 테스트 전략 |
-|------------|------------|
-| ViewModel / UseCase / Repository | **단위 테스트** (BaseMockKTest) → 3-B |
-| Activity / Fragment (FragmentManager, View 직접 참조) | **Instrumented Test** → 3-C |
-| Custom View / 라이브러리 래퍼 (ViewPager, RecyclerView 등) | **Robolectric 단위 테스트** → 3-D |
-| ANR (성능 문제) | **Instrumented Test + assertion** → 3-E |
+테스트는 실패 이유에 따라 두 타입으로 나뉜다:
+
+- **타입 A (재현형)**: 테스트 실행 시 실제로 exception이 throw됨. FAIL = 크래시 재현 성공.
+- **타입 B (조건 검증형)**: 크래시 자체 재현 불가. "크래시 유발 조건이 존재함"을 assertion으로 검증. FAIL = 조건이 아직 있음.
+
+| 크래시 위치 | 테스트 전략 | 타입 |
+|------------|------------|------|
+| ViewModel / UseCase / Repository | **단위 테스트** (BaseMockKTest) → 3-B | A |
+| Activity / Fragment (FragmentManager, View 직접 참조) | **Instrumented Test** → 3-C | A |
+| Custom View / 라이브러리 래퍼 (ViewPager, RecyclerView 등) | **Robolectric 단위 테스트** → 3-D | A 시도 → 불가시 B |
+| ANR (성능 문제) | **Instrumented Test + assertion** → 3-E | B |
+| Native / 3rd-party (Chromium, NDK, JNI 등) | **조건 검증 테스트** → 3-F | B |
 
 어떤 레이어든 테스트 가능한 형태가 반드시 존재한다. 크래시 재현이 어려우면 **방어 코드의 동작을 검증**하는 테스트를 작성한다.
 
@@ -140,7 +153,8 @@ Robolectric 한계로 판단하고 아래 순서로 보완한다:
 - `runTest`, `advanceUntilIdle`
 
 ```bash
-./gradlew :<module>:testDebugUnitTest --tests "패키지.클래스명.테스트명"
+./gradlew :<module>:testStoreDebugUnitTest --tests "패키지.클래스명.테스트명"
+# 플레이버 없는 모듈은 testDebugUnitTest 사용. 모호성 오류 발생 시 testStoreDebugUnitTest로 폴백.
 ```
 
 #### 3-C: Instrumented Test (Activity/Fragment 레이어)
@@ -184,6 +198,24 @@ Robolectric 한계로 판단하고 아래 순서로 보완한다:
 FAIL → 정상 / PASS → 재현 실패, 테스트 수정 필요
 
 #### 3-D: Robolectric 단위 테스트 (Custom View / 라이브러리 래퍼)
+
+**주의사항: Robolectric + MockK 제네릭 타입**
+
+제네릭 반환 타입이 있는 메서드에 `mockk(relaxed = true)` 사용 시
+Robolectric 샌드박스 클래스 로더와 충돌로 ClassCastException 발생 가능:
+```
+FeatureValue$Subclass8 cannot be cast to MyFeature$Value
+```
+제네릭 반환 타입 메서드는 반드시 명시적으로 stub한다:
+```kotlin
+// Bad
+val manager = mockk<ABTestManager>(relaxed = true)
+
+// Good
+val manager = mockk<ABTestManager>().also {
+    every { it.getValue<MyFeature.Value>(FeatureKeys.MY_KEY) } returns null
+}
+```
 
 커스텀 View의 방어 코드(try-catch, null 체크 등)가 동작하는지 검증한다.
 
@@ -230,12 +262,42 @@ fun onCreateViewHolder_whenLargeDataSet_doesNotInflateAllAtOnce() {
 
 FAIL → 정상 / PASS → 재현 실패, 테스트 수정 필요
 
+#### 3-F: 조건 검증 테스트 (Native / 3rd-party 크래시)
+
+크래시가 Chromium·NDK·JNI 등 외부 코드에서 발생해 JVM에서 재현 불가한 경우.
+**"크래시를 유발하는 조건이 우리 코드에 존재하지 않음"을 assertion으로 검증**한다.
+
+```kotlin
+// 예: LAYER_TYPE_HARDWARE 설정 시 Chromium GPU 크래시 (KMA-7160)
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [30])
+class WebViewLayerTypeTest {
+
+    @Test
+    fun `initWebView 기본값으로 호출 시 LAYER_TYPE_HARDWARE가 설정되지 않아야 한다`() {
+        // Given: 기본값으로 초기화
+        val webView = WebView(context)
+
+        // When
+        webViewFacade.initWebView(webView)
+
+        // Then: 크래시 조건 부재 검증 (재현이 아닌 방어 확인)
+        assertNotEquals(View.LAYER_TYPE_HARDWARE, webView.layerType)
+    }
+}
+```
+
+Mutation Spot-Check: 방어 코드 제거 → assertion FAIL 확인 → 원복.
+
 ### ✋ CP2: 실패 테스트 확인
 
 ```
 ## 크래시 재현 테스트 (현재 FAIL)
 
 [테스트 코드 + 실행 결과]
+
+[타입 A] FAIL = 크래시(exception) 재현 성공. 수정 후 PASS 확인 필요.
+[타입 B] FAIL = 크래시 유발 조건이 현재 존재함 확인. 수정 후 조건 제거 검증.
 
 [Enter] 확인, 수정으로 진행  [e] 테스트 재작성  [s] 중단
 ```
