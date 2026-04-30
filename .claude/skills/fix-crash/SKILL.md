@@ -8,7 +8,8 @@
 ## 사용법
 
 ```
-/fix-crash KMA-XXXX
+/fix-crash KMA-XXXX          # 로컬 (CP 대화형)
+/fix-crash KMA-XXXX --ci     # CI 모드 (CP 스킵, 자동 완주)
 ```
 
 ---
@@ -17,22 +18,32 @@
 
 ```
 [Phase 0] 티켓 읽기
+    │  · 브래드크럼 추출 (있으면)
+    │  · 타입 판별: T1 Null/Type | T2 생명주기 | T3 동시성 | T4 ANR | T5 Native/3rd-party
     ↓
-[Phase 1] 탐색 — Grep/Read로 크래시 위치 특정
+[Phase 1] 탐색
+    │  · 공통: crash point 특정 + git blame
+    │  · 담당자 식별 (git log 빈도 기반)
+    │  · 타입별 체크리스트 (T1~T5)
     ↓
-[Phase 2] 분석 — 근본 원인 + 재현 경로
+[Phase 2] 분석
+    │  · 타입별 추가 분석 (생명주기 상태, 타이밍 다이어그램, blamed thread, SDK 이슈 등)
+    │  · 수정 방향 옵션 2-3개 도출
     ↓
-✋ CP1: 분석 승인
+✋ CP1: 분석 승인  ← [로컬] 사람이 옵션 선택 / [CI] 추천 자동 선택 + Jira 담당자 변경
     ↓
 [Phase 3] 실패 테스트 작성 (FAIL 확인)
-    ├─ ViewModel/UseCase → 단위 테스트 (3-B)
-    └─ Activity/Fragment → Instrumented Test (3-C)
+    │  T1 → Unit (3-B) / 재현형
+    │  T2 → Instrumented (3-C) / 재현형
+    │  T3 → Robolectric (3-D) → 필요 시 Instrumented (3-C) / 재현형 or 조건검증형
+    │  T4 → Instrumented (3-E) + Macrobenchmark / 조건검증형
+    └─ T5 → Unit / Robolectric (3-F) / 조건검증형
     ↓
-✋ CP2: 실패 테스트 확인
+✋ CP2: 실패 테스트 확인  ← [로컬] 사람이 확인 / [CI] 자동 통과
     ↓
 [Phase 4] 수정 (PASS 확인 + 컴파일 검증)
     ↓
-✋ CP3: diff 확인 → 커밋 + PR
+✋ CP3: diff 확인 → /commit + /create-pr  ← [CI] 자동 실행
 ```
 
 ---
@@ -43,23 +54,73 @@
 
 `getJiraIssue` (cloudId: `kurly0521.atlassian.net`). 추출:
 - 크래시 클래스/메서드명
-- 수정 방향 (있는 경우)
-- Firebase 크래시 URL (있는 경우 — `/report-crash` 미실행 시 참고용)
+- 스택 트레이스 전문
+- 브래드크럼 (report-crash가 Jira 설명에 삽입한 사용자 행동 흐름; 없으면 생략)
+- Firebase 크래시 URL
+- 수정 방향 힌트 (있는 경우)
+
+#### 타입 판별 (T1~T5)
+
+스택 트레이스 + 크래시 키워드로 결정:
+
+| 타입 | 판별 키워드 |
+|------|-----------|
+| T1. Null/Type | NullPointerException, ClassCastException, `!!` 강제 언랩 |
+| T2. 생명주기 | IllegalStateException, onSaveInstanceState, FragmentManager |
+| T3. 동시성/스레드 | CalledFromWrongThreadException, ConcurrentModificationException, MotionEvent, wrong thread |
+| T4. ANR | ANR, Application Not Responding, blamed=TRUE |
+| T5. Native/3rd-party | JNI, Chromium, NDK, 외부 SDK 패키지명 |
+
+#### 브래드크럼 유무에 따른 Phase 1 출발점
+
+- **있음**: 브래드크럼 → 재현 경로 가설 → 코드 탐색으로 검증
+- **없음**: 스택 트레이스 → crash point → 역방향 탐색
 
 ### Phase 1: 탐색
 
-직접 도구 사용:
-1. CRASH_SUMMARY에서 클래스명/메서드명 키워드 추출
-2. Grep으로 코드베이스 검색
-3. Read로 관련 파일 열어 문제 코드 블록 특정
-4. Fragment/Activity 관계라면 상위 호출자까지 추적
+#### 공통 (모든 타입)
+- [ ] 스택 트레이스에서 crash point 특정 (파일:라인)
+- [ ] `git blame <파일> -L <라인>,<라인>` → 최근 변경자 확인
 
-#### 기존 부분 수정 발견 시
+#### 담당자 식별
 
-탐색 중 동일 크래시에 대한 이전 수정이 일부 파일에만 적용된 흔적 발견 시:
-1. 수정이 누락된 전체 호출 경로를 파악한다
-2. CP1에 "기존 수정 범위"와 "이번 수정 범위"를 명시한다
-3. 이번 티켓 범위에서 일괄 수정할지, 나머지는 별도 티켓으로 분리할지 CP1에서 사용자 확인
+최근 6개월 커밋 빈도 기준 상위 후보 도출:
+
+```bash
+git log --follow --pretty=format:"%ae" --since="6 months ago" <파일> \
+  | grep -v "bot\|noreply\|github-actions" \
+  | sort | uniq -c | sort -rn | head -3
+# 결과 없으면 --since 제거 후 재실행 (전체 이력 기준)
+```
+
+- **로컬**: 상위 3명 보여주고 사람이 선택 → CP1에 기록
+- **CI**: 커밋 빈도 1위 자동 선택 → Jira 담당자 변경은 CP1 이후에 처리
+
+#### T1. Null/Type
+- [ ] null 유입 레이어 특정: 서버 응답? DI 주입 순서? 생명주기 타이밍?
+- [ ] ClassCast: 실제 타입이 언제 바뀌는지 (다형성? 제네릭 erasure? BackStack 재사용?)
+- [ ] `!!` 위치 + null이 될 수 있는 조건
+
+#### T2. 생명주기
+- [ ] crash point에서 생명주기 상태 확인 (`isStateSaved`, `isAdded`, `isDetached`)
+- [ ] 호출을 트리거한 상위 원인 역추적 (코루틴? 콜백? 딜레이?)
+- [ ] `cs.android.com`에서 crash point 메서드 소스 확인 — 내부적으로 어떤 상태 조건을 검사하는지 파악 (예: `checkStateLoss()`, `isStateSaved()` 호출 여부)
+
+#### T3. 동시성/스레드
+- [ ] crash 시점 스레드명 확인 (스택 트레이스)
+- [ ] 공유 상태(mutable)가 어디에 있는지
+- [ ] 관련 framework 코드 확인 (ViewRootImpl, MotionEvent 등)
+
+#### T4. ANR
+- [ ] blamed thread 스택 전문 확인
+- [ ] 메인 스레드 블로킹 지점 식별 (I/O? 락? inflation?)
+- [ ] Phase 0에서 수집한 Firebase 크래시 URL에서 기기/OS 분포 확인 (저사양 집중? 특정 Android 버전?)
+- [ ] blamed thread 스택에 `Hilt`, `@Inject`, `Application.onCreate`, `DataBinderMapperImpl` 등이 보이면 DI/초기화 생성 코드 확인
+
+#### T5. Native/3rd-party
+- [ ] SDK GitHub Issues / 릴리즈 노트 먼저 확인 (알려진 버그?)
+- [ ] 우리 코드에서 크래시를 유발하는 API 호출/상태 특정
+- [ ] 버전별 재현 여부 (Android 버전, SDK 버전)
 
 ### Phase 2: 분석
 
@@ -69,6 +130,8 @@ Phase 1 결과를 이어받아:
 3. 수정 가능 여부: **FIXABLE** / **ESCALATE**
 4. 재현 경로 도출 (Given / When / Then)
 5. **수정 방향 탐색** — 아래 우선순위로 검토 후 선택 근거를 CP1에 명시:
+
+> 수정 방향 옵션을 2-3개 도출할 때 이 우선순위표를 참고한다. 높은 순위 전략이 가능한지 먼저 검토한 후, 가능한 것들 중 2-3개 옵션을 CP1에 제시한다.
 
 #### 수정 전략 우선순위 (높은 순)
 
@@ -84,19 +147,74 @@ Phase 1 결과를 이어받아:
 
 6. 구체적 수정 방법 (파일:라인 + 변경 내용 + 선택 전략 번호)
 
+#### 타입별 추가 분석
+
+**T2 (생명주기)**: 생명주기 상태 + 호출 트리거 + SDK 동작 근거를 명시. AOSP 소스에서 확인한 내부 조건 포함.
+
+**T3 (동시성/스레드)**: 타이밍 다이어그램 작성. 형식:
+```
+스레드 A: [액션1] ──→ [공유 상태 접근]
+스레드 B:          [액션2] ──→ [공유 상태 접근] → 크래시
+```
+
+**T4 (ANR)**: blamed thread 블로킹 원인 + 기기/OS 패턴 명시.
+
+**T5 (Native/3rd-party)**: SDK 이슈 트래커 링크 + workaround 가능 여부 명시.
+
 ### ✋ CP1: 분석 승인
 
-```
-## 원인 분석 + 재현 경로
+미입력 항목이 있으면 CP1 통과 불가. 해당 타입 추가 섹션만 작성 — 나머지 타입 섹션은 생략한다.
 
-[근본 원인 / 발생 조건 / 재현 경로 / 수정 방법 요약]
-
-[Enter] 진행  [e] 수정  [s] 중단
 ```
+## 크래시 분석 (CP1)
+
+### 공통
+- 크래시 한 줄 요약:
+- 발생 경로: [브래드크럼 기반 / 코드 역추적]
+- 문제 코드: <파일:라인>
+- 담당자 후보: [로컬: 상위 3명 중 선택 / CI: 커밋 빈도 1위 자동]
+- 재현 조건:
+  - Given:
+  - When:
+  - Then (크래시 발생):
+
+### 수정 방향 옵션 (2-3개 필수)
+- Option A: [전략명] — 방법 / 장점 / 단점
+- Option B: [전략명] — 방법 / 장점 / 단점
+- Option C: [전략명] — 방법 / 장점 / 단점 (있는 경우)
+→ 추천: Option X (이유)
+
+### T1 추가
+- null/타입 오류 유입 레이어:
+
+### T2 추가
+- crash 시점 생명주기 상태:
+- 호출 트리거:
+- SDK 근거 (AOSP 확인 내용):
+
+### T3 추가 (Phase 2에서 작성한 타이밍 다이어그램을 여기에 포함)
+- 충돌 스레드:
+- 타이밍 다이어그램:
+- SDK/framework 근거:
+
+### T4 추가
+- blamed thread 스택:
+- 블로킹 지점 + 원인:
+- 발생 패턴 (기기/OS):
+
+### T5 추가
+- 유발 조건 (우리 코드):
+- SDK 이슈 링크:
+- 버전별 재현:
+```
+
+[로컬] [Enter] 추천 채택  [b] 다른 옵션 선택  [e] 수정  [s] 중단
+[CI]   추천 옵션 자동 선택 → 진행
 
 ESCALATE 시:
 ```
 ⚠️ 앱 레벨 수정 제한적: <이유>
+담당자: <식별된 담당자>
 [Enter] Jira 코멘트 등록 후 종료  [s] 그냥 종료
 ```
 
@@ -105,22 +223,15 @@ ESCALATE 시:
 > **⛔ 이 Phase는 스킵 불가.** "View 레이어라 테스트 의미 없음" 등의 이유로 건너뛰지 않는다.
 > 크래시 수정의 회귀 방지는 테스트로만 보장된다. 테스트 없는 수정은 Phase 4로 진행할 수 없다.
 
-#### 3-A: 테스트 전략 판단
+#### 3-A: 타입별 테스트 전략
 
-테스트는 실패 이유에 따라 두 타입으로 나뉜다:
-
-- **타입 A (재현형)**: 테스트 실행 시 실제로 exception이 throw됨. FAIL = 크래시 재현 성공.
-- **타입 B (조건 검증형)**: 크래시 자체 재현 불가. "크래시 유발 조건이 존재함"을 assertion으로 검증. FAIL = 조건이 아직 있음.
-
-| 크래시 위치 | 테스트 전략 | 타입 |
-|------------|------------|------|
-| ViewModel / UseCase / Repository | **단위 테스트** (BaseMockKTest) → 3-B | A |
-| Activity / Fragment (FragmentManager, View 직접 참조) | **Instrumented Test** → 3-C | A |
-| Custom View / 라이브러리 래퍼 (ViewPager, RecyclerView 등) | **Robolectric 단위 테스트** → 3-D | A 시도 → 불가시 B |
-| ANR (성능 문제) | **Instrumented Test + assertion** → 3-E | B |
-| Native / 3rd-party (Chromium, NDK, JNI 등) | **조건 검증 테스트** → 3-F | B |
-
-어떤 레이어든 테스트 가능한 형태가 반드시 존재한다. 크래시 재현이 어려우면 **방어 코드의 동작을 검증**하는 테스트를 작성한다.
+| 타입 | 테스트 레벨 | 전략 | 재현 가능 |
+|------|------------|------|----------|
+| T1. Null/Type | Unit Test (3-B) | null/타입 조건 재현 → exception throw 확인 | 재현형 |
+| T2. 생명주기 | Instrumented Test (3-C) | 생명주기 상태 재현 → exception throw 확인 | 재현형 |
+| T3. 동시성/스레드 | Robolectric 시도 (3-D) → 실패 시 Instrumented (3-C) | 재현 성공: exception 확인 / 실패: 방어 코드 동작 검증 + Instrumented 보완 필수 | 재현형 or 조건 검증형 |
+| T4. ANR | Instrumented (3-E) + 필요 시 Macrobenchmark | 재현 불가 → 블로킹 원인 제거 간접 검증 | 조건 검증형 |
+| T5. Native/3rd-party | Unit / Robolectric (3-F) | 재현 불가 → 유발 조건 부재 검증 | 조건 검증형 |
 
 #### Robolectric 한계 시 UI 테스트 보완
 
@@ -292,15 +403,15 @@ Mutation Spot-Check: 방어 코드 제거 → assertion FAIL 확인 → 원복.
 ### ✋ CP2: 실패 테스트 확인
 
 ```
-## 크래시 재현 테스트 (현재 FAIL)
+## 크래시 재현 테스트 (CP2)
 
-[테스트 코드 + 실행 결과]
-
-[타입 A] FAIL = 크래시(exception) 재현 성공. 수정 후 PASS 확인 필요.
-[타입 B] FAIL = 크래시 유발 조건이 현재 존재함 확인. 수정 후 조건 제거 검증.
+- 테스트 전략: [재현형 / 조건 검증형]
+- FAIL 의미: [exception 재현 성공 / 유발 조건 존재 확인 / T3 Robolectric 한계 시: 방어 코드 동작 간접 검증]
+- 테스트 코드 + 실행 결과 (FAIL 로그)
+- Mutation Spot-Check: 방어 코드 제거 → FAIL 확인 → 원복
+```
 
 [Enter] 확인, 수정으로 진행  [e] 테스트 재작성  [s] 중단
-```
 
 ### Phase 4: 수정
 
@@ -324,12 +435,29 @@ Mutation Spot-Check: 방어 코드 제거 → assertion FAIL 확인 → 원복.
 [Enter] 커밋 + PR  [c] 커밋만  [e] 수정 변경  [s] 중단
 ```
 
-커밋:
-```bash
-git add <수정 파일> <테스트 파일>
-git commit -m "<TICKET_KEY> <크래시 수정 요약>"
-```
+커밋: `/commit` 실행
 PR: `/create-pr` 실행
+
+---
+
+## CI 모드
+
+**감지**: `$CI` 환경변수 있으면 자동 / 또는 명시: `/fix-crash KMA-XXXX --ci`
+
+**흐름**:
+```
+Phase 0~1: 동일 (자동 실행)
+Phase 2: 옵션 2-3개 도출 → 추천 옵션 자동 선택 (CP1 스킵)
+담당자: 커밋 빈도 1위 → lookupJiraAccountId → editJiraIssue(assignee)
+Phase 3: 실패 테스트 작성 → FAIL 확인 (CP2 스킵)
+Phase 4: 수정 → PASS → /commit → /create-pr (CP3 스킵)
+```
+
+**CI PR description 포함 항목**:
+- 타입 / 근본 원인 / 재현 조건 (Given/When/Then)
+- 수정 방향 옵션 A/B/C + 선택 근거
+- 테스트 결과 (재현형/조건 검증형, FAIL→PASS)
+- 변경 파일 목록
 
 ---
 
